@@ -19,8 +19,6 @@ const CHAIN_CONFIG = {
     nativeSymbol: "ETH",
     rpcUrl: "https://ethereum-rpc.publicnode.com",
     rpcUrls: [
-      "https://cloudflare-eth.com",
-      "https://rpc.ankr.com/eth",
       "https://1rpc.io/eth",
       "https://ethereum-rpc.publicnode.com",
     ],
@@ -47,7 +45,6 @@ const CHAIN_CONFIG = {
     rpcUrl: "https://arbitrum-one-rpc.publicnode.com",
     rpcUrls: [
       "https://arb1.arbitrum.io/rpc",
-      "https://rpc.ankr.com/arbitrum",
       "https://1rpc.io/arb",
       "https://arbitrum-one-rpc.publicnode.com",
     ],
@@ -121,10 +118,19 @@ const EVM_CHAIN_PARAMS = {
     rpcUrls: ["https://bsc-rpc.publicnode.com"],
     blockExplorerUrls: ["https://bscscan.com"],
   },
+  16602: {
+    chainId: "0x40DA",
+    chainName: "0G Galileo Testnet",
+    nativeCurrency: { name: "OG", symbol: "OG", decimals: 18 },
+    rpcUrls: ["https://evmrpc-testnet.0g.ai"],
+    blockExplorerUrls: ["https://chainscan-galileo.0g.ai"],
+  },
 };
 
 const DEFAULT_PRICE_COINS = ["bitcoin", "ethereum", "binancecoin", "solana", "arbitrum", "pepe", "dogecoin"];
 const MEME_KEYWORDS = ["pepe", "doge", "shib", "inu", "cat", "frog", "meme", "floki", "bonk", "wojak"];
+const OG_TESTNET_CHAIN_ID = 16602;
+const OG_COMPATIBLE_TESTNET_CHAIN_IDS = new Set([16601, 16602]);
 const CONFIG = {
   covalentApiKey: readRuntimeConfig("covalentApiKey"),
   coingeckoDemoApiKey: readRuntimeConfig("coingeckoDemoApiKey"),
@@ -138,12 +144,16 @@ const WALLET_PREFERENCE_KEY = "zendra_wallet_preference";
 const WALLET_AUTOCONNECT_KEY = "zendra_wallet_autoconnect";
 const OG_STORAGE_KEY = "zendra_og_storage_v1";
 const OG_BACKUP_META_KEY = "zendra_og_storage_backup_meta_v1";
+const AI_TRADER_CONTEXT_KEY = "zendra_ai_trader_context_v1";
 const OG_BACKUP_DEBOUNCE_MS = 1500;
+const COINGECKO_PRICE_CACHE_TTL_MS = 2 * 60 * 1000;
 const OG_STORAGE_LIMITS = {
   walletScores: 40,
   priceAlerts: 120,
   riskSnapshots: 40,
 };
+const discoveredEvmWallets = new Map();
+let eip6963Initialized = false;
 const connectedWalletListeners = {
   provider: null,
   accountsChanged: null,
@@ -164,6 +174,7 @@ const state = {
   trackedSummary: null,
   marketPrices: [],
   trendingTokens: [],
+  coinGeckoPriceCache: new Map(),
   ogStorage: getDefaultOgStorage(),
   ogBackupInFlight: false,
   ogBackupTimer: null,
@@ -201,12 +212,13 @@ window.showDashboard = () => scrollToCard(".summary-cards");
 window.showMarkets = () => scrollToCard(".prices-card");
 window.showSwap = () => scrollToCard(".swap-card");
 window.showSmartMoney = () => scrollToCard(".smart-card");
-window.runAgent = () => rerunInsights();
+window.runAgent = () => openAiTraderPage();
 window.connectEVM = () => connectEVM();
 window.selectAndConnectWallet = (walletKey) => selectAndConnectWallet(walletKey);
 window.disconnectWallet = () => disconnectWallet();
 window.backupOgStorageNow = () => backupOgStorageNow();
 window.getOgBackupReadiness = () => getOgBackupReadinessIssues();
+window.configureOgStorage = () => configureOgStorage();
 window.sendEVM = () => sendEVM();
 window.loadTrackedPortfolio = () => loadTrackedPortfolio();
 window.swap = () => swap();
@@ -214,6 +226,7 @@ window.swap = () => swap();
 bootstrap();
 
 async function bootstrap() {
+  initEip6963WalletDiscovery();
   hydrateWalletOptions();
   bindUiListeners();
   loadOgStorage();
@@ -236,7 +249,21 @@ function readRuntimeConfig(key) {
   const runtime = window.ZENDRA_CONFIG || {};
   const envKey = `VITE_${camelToEnvKey(key)}`;
   const envValue = import.meta.env?.[envKey];
-  return runtime[key] || envValue || window.localStorage.getItem(`zendra_${key}`) || "";
+  const localValue = window.localStorage.getItem(`zendra_${key}`) || "";
+  const fallbackValue = getDefaultRuntimeConfigValue(key);
+  return runtime[key] || envValue || localValue || fallbackValue;
+}
+
+function getDefaultRuntimeConfigValue(key) {
+  if (key === "ogEvmRpc") {
+    return "https://evmrpc-testnet.0g.ai";
+  }
+
+  if (key === "ogIndexerRpc") {
+    return "https://indexer-storage-testnet-turbo.0g.ai";
+  }
+
+  return "";
 }
 
 function buildSolanaRpcUrls() {
@@ -410,13 +437,13 @@ function renderStoredOgData() {
 function getOgBackupReadinessIssues() {
   const issues = [];
   if (!CONFIG.ogIndexerRpc) {
-    issues.push("Missing config: ogIndexerRpc");
+    issues.push("Missing 0G indexer RPC");
   }
   if (!CONFIG.ogEvmRpc) {
-    issues.push("Missing config: ogEvmRpc");
+    issues.push("Missing 0G EVM RPC");
   }
   if (!state.signer) {
-    issues.push("No connected EVM signer");
+    issues.push("Connect an EVM wallet");
   }
   if (!state.walletAddress) {
     issues.push("No connected wallet address");
@@ -447,6 +474,7 @@ function scheduleOgBackup(reason) {
 }
 
 async function backupOgStorageNow() {
+  await configureOgStorage();
   const issues = getOgBackupReadinessIssues();
   if (issues.length) {
     setSwapStatus(`0G backup blocked: ${issues.join(" | ")}`);
@@ -460,6 +488,39 @@ async function backupOgStorageNow() {
   }
 
   setSwapStatus("0G backup skipped. Connect an EVM wallet and set ogIndexerRpc + ogEvmRpc.");
+}
+
+async function configureOgStorage() {
+  if (!CONFIG.ogIndexerRpc) {
+    const indexerRpc = window.prompt(
+      "Enter your 0G Indexer RPC URL for Storage uploads",
+      window.localStorage.getItem("zendra_ogIndexerRpc") || "",
+    );
+    if (indexerRpc && indexerRpc.trim()) {
+      setRuntimeConfig("ogIndexerRpc", indexerRpc.trim());
+    }
+  }
+
+  if (!CONFIG.ogEvmRpc) {
+    const evmRpc = window.prompt(
+      "Enter your 0G EVM RPC URL for mainnet transactions",
+      window.localStorage.getItem("zendra_ogEvmRpc") || "",
+    );
+    if (evmRpc && evmRpc.trim()) {
+      setRuntimeConfig("ogEvmRpc", evmRpc.trim());
+    }
+  }
+}
+
+function setRuntimeConfig(key, value) {
+  const normalized = String(value || "").trim();
+  CONFIG[key] = normalized;
+  if (normalized) {
+    window.localStorage.setItem(`zendra_${key}`, normalized);
+    return;
+  }
+
+  window.localStorage.removeItem(`zendra_${key}`);
 }
 
 async function backupOgStorage(reason = "auto") {
@@ -476,12 +537,13 @@ async function backupOgStorage(reason = "auto") {
     if (reason === "manual") {
       setSwapStatus("Preparing 0G backup and requesting wallet signature...");
     }
+    const signer = await ensureOgStorageSigner();
     const { rootHash, txHash } = await storeDashboardSnapshot({
       reason,
       storage: state.ogStorage,
       indexerRpc: CONFIG.ogIndexerRpc,
       evmRpc: CONFIG.ogEvmRpc,
-      signer: state.signer,
+      signer,
     });
 
     state.ogLastBackupMeta = {
@@ -511,26 +573,108 @@ async function backupOgStorage(reason = "auto") {
 }
 
 function getInjectedEvmProviders() {
-  if (!window.ethereum) {
-    return [];
+  const providers = [];
+  const seen = new Set();
+
+  discoveredEvmWallets.forEach(({ provider }) => {
+    if (!provider || seen.has(provider)) {
+      return;
+    }
+    seen.add(provider);
+    providers.push(provider);
+  });
+
+  if (window.ethereum) {
+    if (Array.isArray(window.ethereum.providers) && window.ethereum.providers.length) {
+      window.ethereum.providers.forEach((provider) => {
+        if (!provider || seen.has(provider)) {
+          return;
+        }
+        seen.add(provider);
+        providers.push(provider);
+      });
+    } else if (!seen.has(window.ethereum)) {
+      seen.add(window.ethereum);
+      providers.push(window.ethereum);
+    }
   }
 
-  if (Array.isArray(window.ethereum.providers) && window.ethereum.providers.length) {
-    return window.ethereum.providers;
+  return providers;
+}
+
+function getPrimaryInjectedProvider() {
+  const providers = getInjectedEvmProviders();
+  return providers[0] || window.ethereum || null;
+}
+
+function initEip6963WalletDiscovery() {
+  if (eip6963Initialized) {
+    return;
   }
 
-  return [window.ethereum];
+  eip6963Initialized = true;
+  window.addEventListener("eip6963:announceProvider", handleEip6963ProviderAnnouncement);
+  window.dispatchEvent(new Event("eip6963:requestProvider"));
+}
+
+function handleEip6963ProviderAnnouncement(event) {
+  const detail = event?.detail;
+  const provider = detail?.provider;
+  const info = detail?.info;
+  if (!provider || !info?.uuid) {
+    return;
+  }
+
+  discoveredEvmWallets.set(info.uuid, { info, provider });
+}
+
+function getDiscoveredWalletByRdns(fragment) {
+  const loweredFragment = String(fragment || "").toLowerCase();
+  for (const { info, provider } of discoveredEvmWallets.values()) {
+    const rdns = String(info?.rdns || "").toLowerCase();
+    const name = String(info?.name || "").toLowerCase();
+    if (rdns.includes(loweredFragment) || name.includes(loweredFragment)) {
+      return provider;
+    }
+  }
+
+  return null;
+}
+
+function findMetaMaskProvider() {
+  const providers = getInjectedEvmProviders();
+  const announcedProvider = getDiscoveredWalletByRdns("metamask");
+  const directProvider = window.ethereum?.isMetaMask ? window.ethereum : null;
+  const listedProvider = providers.find((item) => item?.isMetaMask) || null;
+
+  if (announcedProvider) {
+    return announcedProvider;
+  }
+
+  if (directProvider) {
+    return directProvider;
+  }
+
+  if (listedProvider) {
+    return listedProvider;
+  }
+
+  if (providers.length === 1) {
+    return providers[0];
+  }
+
+  return null;
 }
 
 function getWalletDefinition(walletKey) {
   const providers = getInjectedEvmProviders();
   if (walletKey === "metamask") {
-    const provider = providers.find((item) => item.isMetaMask && !item.isRabby) || null;
+    const provider = findMetaMaskProvider();
     return { key: walletKey, label: "MetaMask", kind: "evm", provider };
   }
 
   if (walletKey === "rabby") {
-    const provider = providers.find((item) => item.isRabby) || null;
+    const provider = getDiscoveredWalletByRdns("rabby") || providers.find((item) => item.isRabby) || null;
     return { key: walletKey, label: "Rabby", kind: "evm", provider };
   }
 
@@ -590,8 +734,8 @@ function bindWalletListeners(walletDef) {
     connectedWalletListeners.chainChanged = async (hexChainId) => {
       state.walletChainId = Number.parseInt(hexChainId, 16);
       updateWalletStatus();
-      if (state.walletAddress) {
-        const chain = getChainKeyByChainId(state.walletChainId) || "ethereum";
+      const chain = getChainKeyByChainId(state.walletChainId);
+      if (state.walletAddress && chain) {
         elements.trackAddressInput.value = state.walletAddress;
         elements.trackChainSelect.value = chain;
         await loadTrackedPortfolio(state.walletAddress, chain);
@@ -658,7 +802,20 @@ async function connectEVM() {
 
 async function selectAndConnectWallet(walletKey) {
   closeWalletMenu();
-  const walletDef = getWalletDefinition(walletKey);
+  let walletDef = getWalletDefinition(walletKey);
+  if (walletKey === "metamask" && !walletDef?.provider) {
+    const fallbackProvider = getPrimaryInjectedProvider();
+    if (fallbackProvider) {
+      walletDef = {
+        key: "injected",
+        label: "Injected EVM",
+        kind: "evm",
+        provider: fallbackProvider,
+      };
+      setSwapStatus("MetaMask was not directly exposed, so the app is using the available injected wallet.");
+    }
+  }
+
   if (!walletDef?.provider) {
     elements.walletStatus.textContent = `${walletDef?.label || "Wallet"} not detected`;
     setSwapStatus("Install the selected wallet extension and refresh.");
@@ -670,7 +827,11 @@ async function selectAndConnectWallet(walletKey) {
     window.localStorage.setItem(WALLET_PREFERENCE_KEY, walletDef.key);
     window.localStorage.setItem(WALLET_AUTOCONNECT_KEY, "true");
 
-    const accounts = await walletDef.provider.request({ method: "eth_requestAccounts" });
+    const accounts = await requestWalletAccounts(walletDef.provider);
+    if (!accounts.length) {
+      throw new Error(`${walletDef.label} did not return an account.`);
+    }
+
     await setConnectedEvmWallet(accounts[0], walletDef);
     const chain = getChainKeyByChainId(state.walletChainId) || "ethereum";
     elements.trackAddressInput.value = state.walletAddress;
@@ -678,8 +839,13 @@ async function selectAndConnectWallet(walletKey) {
     await loadTrackedPortfolio(state.walletAddress, chain);
   } catch (error) {
     console.error(error);
-    setSwapStatus("Wallet connection request was cancelled or failed.");
+    setSwapStatus(normalizeError(error, "Wallet connection request was cancelled or failed."));
   }
+}
+
+async function requestWalletAccounts(provider) {
+  const accounts = await provider.request({ method: "eth_requestAccounts" });
+  return Array.isArray(accounts) ? accounts.filter(Boolean) : [];
 }
 
 async function disconnectWallet() {
@@ -816,6 +982,7 @@ async function loadTrackedPortfolio(addressArg, chainArg) {
 
     state.trackedPortfolio = portfolio.assets;
     state.trackedSummary = portfolio.summary;
+    persistAiTraderContext();
     renderPortfolio(portfolio.assets, portfolio.summary, address, chain);
     renderInsights(buildWalletInsights(portfolio.assets, portfolio.summary, chain, address));
   } catch (error) {
@@ -862,7 +1029,7 @@ async function loadEvmPortfolio(address, chain) {
   const provider = await getEvmReadProvider(chain);
   const nativeBalance = await provider.getBalance(address);
   const trackedTokens = Object.values(config.tokens);
-  const priceMap = await fetchPriceMap(
+  const priceMap = await safeFetchPriceMap(
     Array.from(new Set(trackedTokens.map((token) => token.coingeckoId).filter(Boolean))),
   );
   const nativeCoinId = config.tokens[config.nativeSymbol]?.coingeckoId || (chain === "bsc" ? "binancecoin" : "ethereum");
@@ -949,7 +1116,7 @@ async function loadSolanaPortfolio(address) {
   const owner = new PublicKey(address);
   const { lamports, tokenAccounts } = await getSolanaAccountSnapshot(owner);
 
-  const solPriceMap = await fetchPriceMap(["solana"]);
+  const solPriceMap = await safeFetchPriceMap(["solana"]);
   const assets = [{
     symbol: "SOL",
     name: "Solana",
@@ -1123,6 +1290,7 @@ function renderInsights(insights) {
   renderParagraphList(elements.riskList, insights.alerts);
   renderParagraphList(elements.smartMoneyList, insights.smartSignals);
   persistWalletInsights(insights);
+  persistAiTraderContext(insights);
   Promise.resolve(persistWalletInsightsTo0G(insights)).catch((error) => {
     console.error("Wallet analysis store failed", error);
     setOgStorageStatus("0G storage failed.", "error");
@@ -1202,15 +1370,33 @@ async function fetchTrendingTokens() {
 }
 
 async function fetchPriceMap(ids) {
-  const response = await fetchCoinGecko(`/simple/price?vs_currencies=usd&ids=${ids.join(",")}`);
+  const normalizedIds = Array.from(new Set((ids || []).filter(Boolean)));
+  if (!normalizedIds.length) {
+    return {};
+  }
+
+  const cached = getCachedPriceMap(normalizedIds);
+  if (cached) {
+    return cached;
+  }
+
+  const response = await fetchCoinGecko(`/simple/price?vs_currencies=usd&ids=${normalizedIds.join(",")}`);
   if (!response.ok) {
     throw new Error(await buildCoinGeckoError(response, "CoinGecko simple price request failed"));
   }
 
-  return response.json();
+  const payload = await response.json();
+  cachePriceMap(normalizedIds, payload);
+  return payload;
 }
 
 function getCoinGeckoBaseUrl() {
+  if (import.meta.env.DEV) {
+    return CONFIG.coingeckoProApiKey
+      ? "/api/coingecko-pro"
+      : "/api/coingecko";
+  }
+
   return CONFIG.coingeckoProApiKey
     ? "https://pro-api.coingecko.com/api/v3"
     : "https://api.coingecko.com/api/v3";
@@ -1232,6 +1418,63 @@ async function fetchCoinGecko(path) {
   return fetch(url, {
     headers: getCoinGeckoHeaders(),
   });
+}
+
+function getCachedPriceMap(ids) {
+  const now = Date.now();
+  const result = {};
+  let foundAll = true;
+
+  ids.forEach((id) => {
+    const entry = state.coinGeckoPriceCache.get(id);
+    if (!entry || now - entry.timestamp > COINGECKO_PRICE_CACHE_TTL_MS) {
+      foundAll = false;
+      return;
+    }
+
+    result[id] = entry.value;
+  });
+
+  return foundAll ? result : null;
+}
+
+function cachePriceMap(ids, payload) {
+  const timestamp = Date.now();
+  ids.forEach((id) => {
+    if (!payload[id]) {
+      return;
+    }
+
+    state.coinGeckoPriceCache.set(id, {
+      timestamp,
+      value: payload[id],
+    });
+  });
+}
+
+function getStalePriceMap(ids) {
+  const result = {};
+  ids.forEach((id) => {
+    const entry = state.coinGeckoPriceCache.get(id);
+    if (entry?.value) {
+      result[id] = entry.value;
+    }
+  });
+  return result;
+}
+
+async function safeFetchPriceMap(ids) {
+  const normalizedIds = Array.from(new Set((ids || []).filter(Boolean)));
+  if (!normalizedIds.length) {
+    return {};
+  }
+
+  try {
+    return await fetchPriceMap(normalizedIds);
+  } catch (error) {
+    console.warn("CoinGecko price lookup failed, using cached or zero-price fallback.", error);
+    return getStalePriceMap(normalizedIds);
+  }
 }
 
 async function buildCoinGeckoError(response, fallback) {
@@ -1475,6 +1718,38 @@ async function switchToChain(chainId) {
   return true;
 }
 
+async function ensureOgStorageSigner() {
+  if (!state.rawEvmProvider || !state.walletAddress) {
+    throw new Error("Connect an EVM wallet before storing data on 0G.");
+  }
+
+  await refreshConnectedEvmNetworkState();
+
+  if (!OG_COMPATIBLE_TESTNET_CHAIN_IDS.has(state.walletChainId)) {
+    setSwapStatus("Switching wallet to 0G Galileo Testnet for 0G storage...");
+    const switched = await switchToChain(OG_TESTNET_CHAIN_ID);
+    if (!switched) {
+      throw new Error("Switch to 0G Galileo Testnet was not completed.");
+    }
+  }
+
+  if (!state.signer) {
+    throw new Error("Wallet signer is unavailable after switching to 0G Galileo Testnet.");
+  }
+
+  return state.signer;
+}
+
+async function refreshConnectedEvmNetworkState() {
+  if (!state.provider || !state.walletAddress) {
+    return;
+  }
+
+  const network = await state.provider.getNetwork();
+  state.walletChainId = Number(network.chainId);
+  updateWalletStatus();
+}
+
 function renderActivity(lines) {
   renderParagraphList(elements.activityFeed, lines.map((line) => `${new Date().toLocaleTimeString()} | ${line}`));
 }
@@ -1593,6 +1868,13 @@ async function persistWalletInsightsTo0G(insights) {
     return;
   }
 
+  await refreshConnectedEvmNetworkState();
+
+  if (!OG_COMPATIBLE_TESTNET_CHAIN_IDS.has(state.walletChainId)) {
+    setOgStorageStatus("Switch wallet to 0G Galileo Testnet to store on 0G.");
+    return;
+  }
+
   const assets = state.trackedPortfolio.slice(0, 12).map((asset) => ({
     symbol: asset.symbol,
     name: asset.name,
@@ -1686,4 +1968,23 @@ function wait(ms) {
 
 function normalizeError(error, fallbackMessage) {
   return error?.shortMessage || error?.reason || error?.message || fallbackMessage;
+}
+
+function persistAiTraderContext(insights = null) {
+  if (!state.lastTracked?.address || !state.lastTracked?.chain) {
+    return;
+  }
+
+  const payload = {
+    wallet: state.lastTracked,
+    summary: state.trackedSummary,
+    assets: state.trackedPortfolio.slice(0, 12),
+    insights,
+    updatedAt: Date.now(),
+  };
+  window.localStorage.setItem(AI_TRADER_CONTEXT_KEY, JSON.stringify(payload));
+}
+
+function openAiTraderPage() {
+  window.location.href = "/ai-trader.html";
 }

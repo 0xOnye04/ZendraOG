@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ZendraOG AI Mentor</title>
+    <link rel="stylesheet" href="src/style.css">
+  </head>
+  <body>
+    <div class="ai-page-shell">
+      <aside class="sidebar ai-sidebar">
+        <div class="brand">
+          <div class="brand-mark">Z</div>
+          <div>
+            <h1>AI Trader</h1>
+            <p>0G mentor mode</p>
+          </div>
+        </div>
+
+        <nav class="nav-menu">
+          <button type="button" onclick="goToDashboard()">Back To Dashboard</button>
+          <button type="button" onclick="connectTraderWallet()">Connect Trader Wallet</button>
+          <button type="button" onclick="savePreferencesTo0G()">Save Preferences</button>
+          <button type="button" onclick="saveStrategyTo0G()">Save Strategy</button>
+          <button type="button" onclick="saveJournalTo0G()">Save Journal</button>
+          <button type="button" onclick="saveChatHistoryTo0G()">Save Chat History</button>
+        </nav>
+
+        <div class="ai-settings-card">
+          <h3>0G Compute Settings</h3>
+          <label>
+            Compute RPC URL
+            <input id="ogComputeRpcUrlInput" placeholder="https://evmrpc-testnet.0g.ai" />
+          </label>
+          <label>
+            Model
+            <input id="ogComputeModelInput" placeholder="Leave blank to use provider default" />
+          </label>
+          <label>
+            Preferred Provider
+            <input id="ogComputeProviderAddressInput" placeholder="0x... optional provider address" />
+          </label>
+          <button type="button" onclick="refreshProviders()">Refresh Providers</button>
+          <button type="button" onclick="saveMentorSettings()">Save Compute Settings</button>
+          <p id="mentorWalletStatus" class="wallet-status">No wallet connected</p>
+          <div id="mentorIdentityOutput" class="smart-list ai-identity-output">
+            <p>Connected trader wallet details will appear here.</p>
+          </div>
+          <p id="mentorStatus" class="og-storage-status" data-tone="muted">AI mentor idle</p>
+        </div>
+      </aside>
+
+      <main class="main ai-main">
+        <header class="topbar ai-topbar">
+          <div>
+            <h2>AI Trading Mentor</h2>
+            <p class="ai-subtitle">Chat with a trading mentor powered by 0G Compute and back up chat memory, strategies, preferences, and journals on 0G Storage.</p>
+          </div>
+        </header>
+
+        <section class="ai-grid">
+          <section class="card ai-chat-card">
+            <div class="card-heading">
+              <h3>Mentor Chat</h3>
+            </div>
+            <div class="ai-quick-prompts">
+              <button type="button" onclick="usePromptChip('Help me think through a trade idea step by step before I do anything.')">Trade Review</button>
+              <button type="button" onclick="usePromptChip('Ask me the right questions to build a trading plan for today.')">Build Plan</button>
+              <button type="button" onclick="usePromptChip('Explain what risk I might be missing in this setup.')">Risk Check</button>
+              <button type="button" onclick="usePromptChip('Coach me through what kind of trader I am based on this wallet and my habits.')">Trader Coach</button>
+            </div>
+            <div id="mentorChatMessages" class="ai-chat-log"></div>
+            <div class="ai-chat-composer">
+              <textarea id="mentorPromptInput" rows="5" placeholder="Ask for a market read, trade plan, risk review, follow-up questions, or a strategy discussion."></textarea>
+              <div class="ai-composer-actions">
+                <button type="button" onclick="clearMentorChat()">Clear Chat</button>
+                <button type="button" onclick="sendMentorPrompt()">Send To 0G Compute</button>
+              </div>
+              <button type="button" class="primary-pill ai-chat-ask-button" onclick="sendMentorPrompt()">Ask Mentor</button>
+            </div>
+          </section>
+
+          <section class="ai-side-column">
+            <section class="card ai-context-card">
+              <div class="card-heading">
+                <h3>Tracked Wallet Context</h3>
+              </div>
+              <div id="mentorTrackedContext" class="smart-list">
+                <p>No tracked wallet context found yet. Track a wallet on the dashboard first.</p>
+              </div>
+            </section>
+
+            <section class="card ai-memory-card">
+              <div class="card-heading">
+                <h3>Mentor Memory</h3>
+              </div>
+              <label class="ai-form-label">
+                User Preferences
+                <textarea id="mentorMemoryInput" rows="5" placeholder="Example: swing trader, risk limit 1% per trade, prefers BTC/ETH, avoids revenge trades."></textarea>
+              </label>
+              <label class="ai-form-label">
+                Trading Strategy
+                <textarea id="mentorStrategyInput" rows="5" placeholder="Describe the strategy the mentor should remember and refine over time."></textarea>
+              </label>
+              <label class="ai-form-label">
+                Trade Journal
+                <textarea id="mentorJournalInput" rows="5" placeholder="Store recurring lessons, mistakes, emotions, and review notes."></textarea>
+              </label>
+            </section>
+
+            <section class="card ai-analysis-card">
+              <div class="card-heading">
+                <h3>Mentor Notes</h3>
+              </div>
+              <div id="mentorReadinessOutput" class="smart-list ai-readiness-output">
+                <p>Checking 0G Compute readiness...</p>
+              </div>
+              <div id="mentorAnalysisOutput" class="smart-list ai-analysis-detail">
+                <p>The mentor will summarize the latest response and streaming status here.</p>
+              </div>
+              <div id="mentorComputeOutput" class="smart-list">
+                <p>No 0G compute request has been made yet.</p>
+              </div>
+              <div id="mentorProviderOutput" class="smart-list">
+                <p>No provider metadata loaded yet.</p>
+              </div>
+            </section>
+          </section>
+        </section>
+      </main>
+    </div>
+
+    <script type="module" src="src/aiTrader.js"></script>
+  </body>
+</html>

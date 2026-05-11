@@ -12,7 +12,22 @@ export function resolve(...parts) {
   return join(...parts);
 }
 
+export function dirname(path) {
+  const normalized = String(path || "").replace(/\\/g, "/");
+  const segments = normalized.split("/");
+  segments.pop();
+  return segments.join("/") || ".";
+}
+
+export function basename(path) {
+  const normalized = String(path || "").replace(/\\/g, "/");
+  const segments = normalized.split("/");
+  return segments.pop() || "";
+}
+
 const path = {
+  basename,
+  dirname,
   join,
   resolve,
 };
